@@ -1,0 +1,7 @@
+MEMORY_BANK.md
+LEARNING_LOG.md
+.env
+__pycache__/
+.venv/
+.history/
+**/.DS_Store
