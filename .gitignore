@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 .history/
 **/.DS_Store
+*.db
