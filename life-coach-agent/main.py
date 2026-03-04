@@ -1,10 +1,21 @@
+import asyncio
+import streamlit as st
+from openai import OpenAI
+from agents import (
+    Agent, 
+    Runner, 
+    SQLiteSession, 
+    WebSearchTool, 
+    FileSearchTool, 
+    ModelSettings,
+)
+
 import dotenv
 dotenv.load_dotenv()
 
-import asyncio
-import json
-import streamlit as st
-from agents import Agent, Runner, SQLiteSession, WebSearchTool, ModelSettings
+client = OpenAI()
+
+VECTOR_STORE_ID = "vs_69a84aecf5388191a7fa8f286744beb4"
 
 st.title("🧚 Life Coach Agent")
 
@@ -28,76 +39,118 @@ async def paint_history():
                         st.write(content)
                 else:
                     if message["type"] == "message":
-                        st.write(message["content"][0]["text"])
+                        st.write(message["content"][0]["text"].replace("$", "\$"))
         if "type" in message:
             if message["type"] == "web_search_call":
                 with st.chat_message("ai"):
-                    st.write("✅ Searched the web")
+                    st.write("🔍 Searched the web")
+            elif message["type"] == "file_search_call":
+                with st.chat_message("ai"):
+                    st.write("🗂️ Searched your files")
 
 
 asyncio.run(paint_history())
-
-
-def update_status(status_container, event_data):
-    if event_data.type == "response.web_search_call.in_progress":
-        status_container.update(label="🔍 Searching the web...", state="running")
 
 
 async def run_agent(message):
     agent = Agent(
         name="Life Coach",
         instructions="""
-        You are a Fairy Godmother life coach — like a beloved grandmother or great-aunt
-        who knows your user inside out and wants nothing more than to see them shine.
+        You are a Fairy Godmother life coach — magical, all-knowing, and deeply devoted to your godchild.
+        You speak like a beloved grandmother: warm, familiar, honest. Not formal, not stiff.
 
         Your personality:
-        - Speak like you're giving heartfelt advice to your favourite grandchild — warm,
-          familiar, close. Not formal, not stiff.
-        - Keep responses short and to the point. No long lists. Just what they need to hear.
-        - You believe in them, but you show it quietly — not with exclamation marks, but with honesty.
-        - Grounded and real. Warm, but not over the top.
+        - Keep responses short and to the point — no long lists
+        - You believe in them, but show it quietly — not with exclamation marks, but with honesty
+        - Grounded and real — warm, but not over the top
 
         When responding:
-        - Use web search to find the latest evidence-based advice
-        - Do NOT use markdown headers (# or ##) — use ### for section titles if needed, and **bold** for emphasis
+        - For questions about personal goals: first use file search to find relevant context, then use web search for evidence-based advice — always use both
+        - Between tool calls, briefly narrate what you found and what you're doing next (e.g. "Your goals say X. Let me look up the latest advice on that...")
+        - Do NOT use markdown headers (# or ##) — use ### for section titles if needed
         - Respond in the same language the user uses (Korean or English)
         - When speaking Korean, always use 반말 (informal speech) — like a close grandmother talking to her grandchild
         """,
-        tools=[WebSearchTool()],
+        tools=[
+            WebSearchTool(),
+            FileSearchTool(
+                vector_store_ids=[VECTOR_STORE_ID],
+                max_num_results=3,
+            ),
+        ],
         model_settings=ModelSettings(tool_choice="required"),
     )
 
-    with st.chat_message("ai"):
-        status_container = st.status("⏳", expanded=False)
-        text_placeholder = st.empty()
-        response = ""
+    file_search_created = False
+    file_search_status = None
+    web_search_created = False
+    web_search_status = None
+    text_placeholder = None
+    response = ""
 
-        stream = Runner.run_streamed(
-            agent,
-            message,
-            session=session,
-        )
+    stream = Runner.run_streamed(
+        agent,
+        message,
+        session=session,
+    )
 
-        async for event in stream.stream_events():
-            if event.type == "run_item_stream_event":
-                if event.item.type == "tool_call_item":
-                    raw_query = event.item.raw_item.action.query
-                    query = json.loads(f'"{raw_query}"')
-                    status_container.update(label=f'✅ Searched: "{query}"', state="complete")
-            if event.type == "raw_response_event":
-                update_status(status_container, event.data)
+    async for event in stream.stream_events():
+        if event.type == "raw_response_event":
+            event_type = event.data.type
 
-                if event.data.type == "response.output_text.delta":
-                    response += event.data.delta
-                    text_placeholder.write(response)
+            if "file_search_call" in event_type:
+                if not file_search_created:
+                    file_search_created = True
+                    text_placeholder = None
+                    response = ""
+                    msg = st.chat_message("ai")
+                    file_search_status = msg.status("🗂️ Searching your files...", expanded=False)
+                if event_type == "response.file_search_call.completed":
+                    file_search_status.update(label="✅ File search completed", state="complete")
+
+            elif "web_search_call" in event_type:
+                if not web_search_created:
+                    web_search_created = True
+                    text_placeholder = None
+                    response = ""
+                    msg = st.chat_message("ai")
+                    web_search_status = msg.status("🔍 Searching the web...", expanded=False)
+                if event_type == "response.web_search_call.completed":
+                    web_search_status.update(label="✅ Web search completed", state="complete")
+
+            elif event_type == "response.output_text.delta":
+                if text_placeholder is None:
+                    msg = st.chat_message("ai")
+                    text_placeholder = msg.empty()
+                response += event.data.delta
+                text_placeholder.write(response)
 
 
-prompt = st.chat_input("무엇이든 물어보세요. 함께 해결해 드릴게요!")
+prompt = st.chat_input(
+    "I'm your Fairy Godmother. What's on your mind?", 
+    accept_file=True, 
+    file_type=["txt"],
+)
 
 if prompt:
-    with st.chat_message("human"):
-        st.write(prompt)
-    asyncio.run(run_agent(prompt))
+    for file in prompt.files:
+        with st.chat_message("ai"):
+            with st.status("⏳ Uploading file...") as status:
+                uploaded_file = client.files.create(
+                    file=(file.name, file.getvalue()),
+                    purpose="user_data",
+                )
+                status.update(label="⏳ Attaching file...")
+                client.vector_stores.files.create(
+                    vector_store_id=VECTOR_STORE_ID,
+                    file_id=uploaded_file.id,
+                )
+                status.update(label="✅ File uploaded", state="complete")
+
+    if prompt.text:
+        with st.chat_message("human"):
+            st.write(prompt.text)
+        asyncio.run(run_agent(prompt.text))
 
 
 with st.sidebar:
