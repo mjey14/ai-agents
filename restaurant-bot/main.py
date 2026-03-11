@@ -5,15 +5,16 @@ import asyncio
 import json
 import os
 import streamlit as st
-from agents import Runner, SQLiteSession
+from agents import Runner, SQLiteSession, InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered
 from my_agents.agents import triage_agent
 
 st.title("🍽️ Restaurant Bot")
 
 HANDOFF_MESSAGES = {
-    "Menu Agent": "🥗 메뉴 전문가에게 연결합니다...",
+    "Menu Agent": "🥗 메뉴 담당자에게 연결합니다...",
     "Order Agent": "📋 주문 담당자에게 연결합니다...",
     "Reservation Agent": "📅 예약 담당자에게 연결합니다...",
+    "Complaints Agent": "💬 CS 담당자에게 연결합니다...",
 }
 
 AGENT_HISTORY_FILE = "agent_history.json"
@@ -74,37 +75,48 @@ async def run_agent(message):
     text_placeholder = None
     response = ""
 
-    stream = Runner.run_streamed(
-        st.session_state["agent"],
-        message,
-        session=session,
-    )
+    try:
+        stream = Runner.run_streamed(
+            st.session_state["agent"],
+            message,
+            session=session,
+        )
 
-    async for event in stream.stream_events():
-        if event.type == "raw_response_event":
-            if event.data.type == "response.output_text.delta":
-                if msg is None:
-                    msg = st.chat_message(current_name)
-                    text_placeholder = msg.empty()
-                response += event.data.delta
-                text_placeholder.write(response)
+        async for event in stream.stream_events():
+            if event.type == "raw_response_event":
+                if event.data.type == "response.output_text.delta":
+                    if msg is None:
+                        msg = st.chat_message(current_name)
+                        text_placeholder = msg.empty()
+                    response += event.data.delta
+                    text_placeholder.write(response)
 
-        elif event.type == "agent_updated_stream_event":
-            if st.session_state["agent"].name != event.new_agent.name:
-                if response:
-                    agents_responded.append(current_name)
+            elif event.type == "agent_updated_stream_event":
+                if st.session_state["agent"].name != event.new_agent.name:
+                    if response:
+                        agents_responded.append(current_name)
 
-                handoff_msg = HANDOFF_MESSAGES.get(event.new_agent.name)
-                if handoff_msg:
-                    st.info(handoff_msg)
-                st.session_state["agent"] = event.new_agent
-                current_name = agent_display_name(event.new_agent.name)
-                msg = None
-                text_placeholder = None
-                response = ""
+                    handoff_msg = HANDOFF_MESSAGES.get(event.new_agent.name)
+                    if handoff_msg:
+                        st.info(handoff_msg)
+                    st.session_state["agent"] = event.new_agent
+                    current_name = agent_display_name(event.new_agent.name)
+                    msg = None
+                    text_placeholder = None
+                    response = ""
 
-    if response:
-        agents_responded.append(current_name)
+        if response:
+            agents_responded.append(current_name)
+
+    except InputGuardrailTripwireTriggered:
+        with st.chat_message("Triage"):
+            st.write("저는 레스토랑 관련 질문에 대해서만 도와드리고 있어요. 메뉴를 확인하거나, 예약하거나, 음식을 주문할 수 있어요. 😊")
+
+    except OutputGuardrailTripwireTriggered:
+        if text_placeholder:
+            text_placeholder.empty()
+        with st.chat_message(current_name):
+            st.write("죄송합니다. 응답을 처리하는 중에 문제가 발생했습니다. 다시 질문해 주세요.")
 
     history = load_agent_history()
     history.extend(agents_responded)
